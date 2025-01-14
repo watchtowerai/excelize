@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -218,14 +217,13 @@ func TestCoordinatesToCellName_Error(t *testing.T) {
 }
 
 func TestCoordinatesToRangeRef(t *testing.T) {
-	f := NewFile()
-	_, err := f.coordinatesToRangeRef([]int{})
+	_, err := coordinatesToRangeRef([]int{})
 	assert.EqualError(t, err, ErrCoordinates.Error())
-	_, err = f.coordinatesToRangeRef([]int{1, -1, 1, 1})
-	assert.EqualError(t, err, "invalid cell reference [1, -1]")
-	_, err = f.coordinatesToRangeRef([]int{1, 1, 1, -1})
-	assert.EqualError(t, err, "invalid cell reference [1, -1]")
-	ref, err := f.coordinatesToRangeRef([]int{1, 1, 1, 1})
+	_, err = coordinatesToRangeRef([]int{1, -1, 1, 1})
+	assert.Equal(t, newCoordinatesToCellNameError(1, -1), err)
+	_, err = coordinatesToRangeRef([]int{1, 1, 1, -1})
+	assert.Equal(t, newCoordinatesToCellNameError(1, -1), err)
+	ref, err := coordinatesToRangeRef([]int{1, 1, 1, 1})
 	assert.NoError(t, err)
 	assert.EqualValues(t, ref, "A1:A1")
 }
@@ -236,6 +234,12 @@ func TestSortCoordinates(t *testing.T) {
 
 func TestInStrSlice(t *testing.T) {
 	assert.EqualValues(t, -1, inStrSlice([]string{}, "", true))
+}
+
+func TestAttrValue(t *testing.T) {
+	assert.Empty(t, (&attrValString{}).Value())
+	assert.False(t, (&attrValBool{}).Value())
+	assert.Zero(t, (&attrValFloat{}).Value())
 }
 
 func TestBoolValMarshal(t *testing.T) {
@@ -268,6 +272,15 @@ func TestBoolValUnmarshalXML(t *testing.T) {
 	assert.EqualError(t, attr.UnmarshalXML(xml.NewDecoder(strings.NewReader("")), xml.StartElement{}), io.EOF.Error())
 }
 
+func TestExtUnmarshalXML(t *testing.T) {
+	f, extLst := NewFile(), decodeExtLst{}
+	expected := fmt.Sprintf(`<extLst><ext uri="%s" xmlns:x14="%s"/></extLst>`,
+		ExtURISlicerCachesX14, NameSpaceSpreadSheetX14.Value)
+	assert.NoError(t, f.xmlNewDecoder(strings.NewReader(expected)).Decode(&extLst))
+	assert.Len(t, extLst.Ext, 1)
+	assert.Equal(t, extLst.Ext[0].URI, ExtURISlicerCachesX14)
+}
+
 func TestBytesReplace(t *testing.T) {
 	s := []byte{0x01}
 	assert.EqualValues(t, s, bytesReplace(s, []byte{}, []byte{}, 0))
@@ -275,13 +288,19 @@ func TestBytesReplace(t *testing.T) {
 
 func TestGetRootElement(t *testing.T) {
 	assert.Len(t, getRootElement(xml.NewDecoder(strings.NewReader(""))), 0)
+	// Test get workbook root element which all workbook XML namespace has prefix
+	f := NewFile()
+	d := f.xmlNewDecoder(bytes.NewReader([]byte(`<x:workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"></x:workbook>`)))
+	assert.Len(t, getRootElement(d), 3)
 }
 
 func TestSetIgnorableNameSpace(t *testing.T) {
 	f := NewFile()
-	f.xmlAttr["xml_path"] = []xml.Attr{{}}
+	f.xmlAttr.Store("xml_path", []xml.Attr{{}})
 	f.setIgnorableNameSpace("xml_path", 0, xml.Attr{Name: xml.Name{Local: "c14"}})
-	assert.EqualValues(t, "c14", f.xmlAttr["xml_path"][0].Value)
+	attrs, ok := f.xmlAttr.Load("xml_path")
+	assert.EqualValues(t, "c14", attrs.([]xml.Attr)[0].Value)
+	assert.True(t, ok)
 }
 
 func TestStack(t *testing.T) {
@@ -342,9 +361,6 @@ func TestReadBytes(t *testing.T) {
 }
 
 func TestUnzipToTemp(t *testing.T) {
-	if ver := runtime.Version(); strings.HasPrefix(ver, "go1.19") || strings.HasPrefix(ver, "go1.2") {
-		t.Skip()
-	}
 	os.Setenv("TMPDIR", "test")
 	defer os.Unsetenv("TMPDIR")
 	assert.NoError(t, os.Chmod(os.TempDir(), 0o444))
@@ -362,7 +378,7 @@ func TestUnzipToTemp(t *testing.T) {
 		"\x00\x00\x00\x00\x0000000000\x00\x00\x00\x00000" +
 		"00000000PK\x01\x0200000000" +
 		"0000000000000000\v\x00\x00\x00" +
-		"\x00\x0000PK\x05\x06000000\x05\x000000" +
+		"\x00\x0000PK\x05\x06000000\x05\x00\xfd\x00\x00\x00" +
 		"\v\x00\x00\x00\x00\x00")
 	z, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	assert.NoError(t, err)
