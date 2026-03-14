@@ -366,6 +366,14 @@ func TestAdjustCalcChain(t *testing.T) {
 
 	f.CalcChain.C[1].R = "invalid coordinates"
 	assert.Equal(t, f.InsertCols("Sheet1", "A", 1), newCellNameToCoordinatesError("invalid coordinates", newInvalidCellNameError("invalid coordinates")))
+	f.CalcChain = &xlsxCalcChain{
+		C: []xlsxCalcChainC{
+			{R: "A1", I: 2}, {R: "B3", I: 1}, {R: "C1", I: 0},
+		},
+	}
+	assert.NoError(t, f.RemoveRow("Sheet1", 3))
+	assert.Equal(t, []xlsxCalcChainC{{R: "A1", I: 2}, {R: "C1", I: 0}}, f.CalcChain.C)
+
 	f.CalcChain = nil
 	assert.NoError(t, f.InsertCols("Sheet1", "A", 1))
 }

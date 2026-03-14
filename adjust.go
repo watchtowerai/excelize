@@ -428,24 +428,42 @@ func (f *File) adjustCalcChain(dir adjustDirection, num, offset, sheetID int) er
 	if f.CalcChain == nil {
 		return nil
 	}
-	for index, c := range f.CalcChain.C {
-		if c.I != sheetID {
+	var prevSheetID int
+	for index := 0; index < len(f.CalcChain.C); index++ {
+		calcChain := f.CalcChain.C[index]
+		currentSheetID := calcChain.I
+		if currentSheetID == 0 {
+			currentSheetID = prevSheetID
+		}
+		if currentSheetID != sheetID {
+			prevSheetID = currentSheetID
 			continue
 		}
-		colNum, rowNum, err := CellNameToCoordinates(c.R)
+		colNum, rowNum, err := CellNameToCoordinates(calcChain.R)
 		if err != nil {
 			return err
 		}
 		if dir == rows && num <= rowNum {
+			if offset < 0 && rowNum < num-offset {
+				f.CalcChain.C = append(f.CalcChain.C[:index], f.CalcChain.C[index+1:]...)
+				index--
+				continue
+			}
 			if newRow := rowNum + offset; newRow > 0 {
 				f.CalcChain.C[index].R, _ = CoordinatesToCellName(colNum, newRow)
 			}
 		}
 		if dir == columns && num <= colNum {
+			if offset < 0 && colNum < num-offset {
+				f.CalcChain.C = append(f.CalcChain.C[:index], f.CalcChain.C[index+1:]...)
+				index--
+				continue
+			}
 			if newCol := colNum + offset; newCol > 0 {
 				f.CalcChain.C[index].R, _ = CoordinatesToCellName(newCol, rowNum)
 			}
 		}
+		prevSheetID = currentSheetID
 	}
 	return nil
 }
