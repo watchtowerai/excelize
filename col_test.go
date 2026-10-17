@@ -1,7 +1,11 @@
 package excelize
 
 import (
+	"fmt"
 	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -71,6 +75,35 @@ func TestCols(t *testing.T) {
 	cols.Next()
 	_, err = cols.Rows()
 	assert.EqualError(t, err, "XML syntax error on line 1: invalid UTF-8")
+
+	f = NewFile()
+	f.Sheet.Delete("xl/worksheets/sheet1.xml")
+	f.Pkg.Store("xl/worksheets/sheet1.xml", []byte(`<worksheet><sheetData><row r="A"><c r="2" t="inlineStr"><is><t>B</t></is></c></row></sheetData></worksheet>`))
+	f.checked = sync.Map{}
+	_, err = f.Cols("Sheet1")
+	assert.EqualError(t, err, `strconv.Atoi: parsing "A": invalid syntax`)
+
+	f.Pkg.Store("xl/worksheets/sheet1.xml", []byte(`<worksheet><sheetData><row r="2"><c r="A" t="inlineStr"><is><t>B</t></is></c></row></sheetData></worksheet>`))
+	_, err = f.Cols("Sheet1")
+	assert.EqualError(t, err, newCellNameToCoordinatesError("A", newInvalidCellNameError("A")).Error())
+
+	t.Run("with_invalid_worksheet_xml", func(t *testing.T) {
+		f := NewFile()
+		f.Sheet.Delete("xl/worksheets/sheet1.xml")
+		f.Pkg.Store("xl/worksheets/sheet1.xml", []byte(`<worksheet><sheetData><row r="1"><c r="A1"><v>1</v></c></row><row r="2"><c r="A"2><v>2</v></c></row></sheetData></worksheet>`))
+		cols, err := f.Cols("Sheet1")
+		assert.NoError(t, err)
+		cnt := 0
+		row := []string{}
+		for cols.Next() {
+			cnt++
+			row, err = cols.Rows()
+			assert.NoError(t, err)
+		}
+		assert.Equal(t, 1, cnt)
+		assert.Equal(t, []string{"1"}, row)
+		assert.NoError(t, f.Close())
+	})
 }
 
 func TestColumnsIterator(t *testing.T) {
@@ -124,12 +157,12 @@ func TestGetColsError(t *testing.T) {
 
 	f = NewFile()
 	f.Sheet.Delete("xl/worksheets/sheet1.xml")
-	f.Pkg.Store("xl/worksheets/sheet1.xml", []byte(`<worksheet><sheetData><row r="A"><c r="2" t="inlineStr"><is><t>B</t></is></c></row></sheetData></worksheet>`))
-	f.checked = nil
+	f.Pkg.Store("xl/worksheets/sheet1.xml", fmt.Appendf(nil, `<worksheet xmlns="%s"><sheetData><row r="A"><c r="2" t="inlineStr"><is><t>B</t></is></c></row></sheetData></worksheet>`, NameSpaceSpreadSheet.Value))
+	f.checked = sync.Map{}
 	_, err = f.GetCols("Sheet1")
 	assert.EqualError(t, err, `strconv.Atoi: parsing "A": invalid syntax`)
 
-	f.Pkg.Store("xl/worksheets/sheet1.xml", []byte(`<worksheet><sheetData><row r="2"><c r="A" t="inlineStr"><is><t>B</t></is></c></row></sheetData></worksheet>`))
+	f.Pkg.Store("xl/worksheets/sheet1.xml", fmt.Appendf(nil, `<worksheet xmlns="%s"><sheetData><row r="2"><c r="A" t="inlineStr"><is><t>B</t></is></c></row></sheetData></worksheet>`, NameSpaceSpreadSheet.Value))
 	_, err = f.GetCols("Sheet1")
 	assert.EqualError(t, err, newCellNameToCoordinatesError("A", newInvalidCellNameError("A")).Error())
 
@@ -139,7 +172,7 @@ func TestGetColsError(t *testing.T) {
 	cols.totalRows = 2
 	cols.totalCols = 2
 	cols.curCol = 1
-	cols.sheetXML = []byte(`<worksheet><sheetData><row r="1"><c r="A" t="inlineStr"><is><t>A</t></is></c></row></sheetData></worksheet>`)
+	cols.sheetXML = fmt.Appendf(nil, `<worksheet xmlns="%s"><sheetData><row r="1"><c r="A" t="inlineStr"><is><t>A</t></is></c></row></sheetData></worksheet>`, NameSpaceSpreadSheet.Value)
 	_, err = cols.Rows()
 	assert.EqualError(t, err, newCellNameToCoordinatesError("A", newInvalidCellNameError("A")).Error())
 
@@ -217,7 +250,7 @@ func TestColumnVisibility(t *testing.T) {
 		assert.Equal(t, true, visible)
 		assert.NoError(t, err)
 
-		// Test get column visible on an inexistent worksheet
+		// Test get column visible on not exists worksheet
 		_, err = f.GetColVisible("SheetN", "F")
 		assert.EqualError(t, err, "sheet SheetN does not exist")
 		// Test get column visible with invalid sheet name
@@ -353,6 +386,16 @@ func TestSetColStyle(t *testing.T) {
 	f.Styles = nil
 	f.Pkg.Store(defaultXMLPathStyles, MacintoshCyrillicCharset)
 	assert.EqualError(t, f.SetColStyle("Sheet1", "C:F", styleID), "XML syntax error on line 1: invalid UTF-8")
+
+	// Test set column style with worksheet properties columns default width settings
+	f = NewFile()
+	assert.NoError(t, f.SetSheetProps("Sheet1", &SheetPropsOptions{DefaultColWidth: float64Ptr(20)}))
+	style, err = f.NewStyle(&Style{Alignment: &Alignment{Vertical: "center"}})
+	assert.NoError(t, err)
+	assert.NoError(t, f.SetColStyle("Sheet1", "A:Z", style))
+	width, err := f.GetColWidth("Sheet1", "B")
+	assert.NoError(t, err)
+	assert.Equal(t, 20.0, width)
 }
 
 func TestColWidth(t *testing.T) {
@@ -373,7 +416,7 @@ func TestColWidth(t *testing.T) {
 	width, err = f.GetColWidth("Sheet1", "A")
 	assert.NoError(t, err)
 	assert.Equal(t, 10.0, width)
-	assert.Equal(t, 76, f.getColWidth("Sheet1", 1))
+	assert.Equal(t, 80, f.getColWidth("Sheet1", 1))
 
 	// Test set and get column width with illegal cell reference
 	width, err = f.GetColWidth("Sheet1", "*")
@@ -393,6 +436,19 @@ func TestColWidth(t *testing.T) {
 
 	assert.NoError(t, f.SaveAs(filepath.Join("test", "TestColWidth.xlsx")))
 	convertRowHeightToPixels(0)
+
+	t.Run("with_invalid_column_number", func(t *testing.T) {
+		f := NewFile()
+		ws, err := f.workSheetReader("Sheet1")
+		assert.NoError(t, err)
+		ws.Cols = &xlsxCols{Col: []xlsxCol{{Min: 0, Max: MaxColumns + 1, Width: float64Ptr(9)}}}
+		assert.NoError(t, f.SetColWidth("Sheet1", "A", "A", 12))
+		assert.Equal(t, len(ws.Cols.Col), MaxColumns)
+		width, err := f.GetColWidth("Sheet1", "A")
+		assert.NoError(t, err)
+		assert.Equal(t, 12.0, width)
+		assert.NoError(t, f.Close())
+	})
 }
 
 func TestGetColStyle(t *testing.T) {
@@ -461,5 +517,84 @@ func TestRemoveCol(t *testing.T) {
 }
 
 func TestConvertColWidthToPixels(t *testing.T) {
-	assert.Equal(t, -11.0, convertColWidthToPixels(-1))
+	assert.Equal(t, -7.0, convertColWidthToPixels(-1))
+}
+
+func TestAutoFitColWidth(t *testing.T) {
+	f := NewFile()
+	assert.NoError(t, f.SetColVisible("Sheet1", "A:C", false))
+	assert.NoError(t, f.SetCellFormula("Sheet1", "A1", "SUBSTITUTE(\"1 \",\" \",\"\")"))
+	assert.NoError(t, f.AutoFitColWidth("Sheet1", "A:B"))
+	assert.NoError(t, f.SetCellValue("Sheet1", "C1", 1234567890))
+	assert.NoError(t, f.AutoFitColWidth("Sheet1", "C"))
+	visible, err := f.GetColVisible("Sheet1", "A")
+	assert.NoError(t, err)
+	assert.True(t, visible)
+	visible, err = f.GetColVisible("Sheet1", "B")
+	assert.NoError(t, err)
+	assert.False(t, visible)
+	visible, err = f.GetColVisible("Sheet1", "C")
+	assert.NoError(t, err)
+	assert.True(t, visible)
+	styleID, err := f.NewStyle(&Style{Font: &Font{Family: "Microsoft YaHei", Bold: true, Italic: true, Charset: intPtr(134)}})
+	assert.NoError(t, err)
+	assert.NoError(t, f.SetColStyle("Sheet1", "D", styleID))
+	assert.NoError(t, f.SetCellValue("Sheet1", "D1", 1234567890))
+	assert.NoError(t, f.SetCellValue("Sheet1", "D2", "文本1234567890"))
+	assert.NoError(t, f.AutoFitColWidth("Sheet1", "D"))
+	assert.NoError(t, f.SetCellValue("Sheet1", "E1", "text"))
+	assert.NoError(t, f.SetCellValue("Sheet1", "E2", "文本********"))
+	assert.NoError(t, f.AutoFitColWidth("Sheet1", "E"))
+	styleID, err = f.NewStyle(&Style{Font: &Font{Size: 50}})
+	assert.NoError(t, err)
+	assert.NoError(t, f.SetCellStyle("Sheet1", "F1", "F1", styleID))
+	assert.NoError(t, f.SetCellValue("Sheet1", "F1", "Text"))
+	assert.NoError(t, f.AutoFitColWidth("Sheet1", "F"))
+	assert.NoError(t, err)
+	assert.NoError(t, f.SetCellFormula("Sheet1", "G1", "1/0"))
+	assert.NoError(t, f.SetCellFormula("Sheet1", "G2", "1^\"text\""))
+	assert.NoError(t, f.AutoFitColWidth("Sheet1", "G:G"))
+
+	names := make([]string, 0, len(supportedFontWidthFactors))
+	for name := range supportedFontWidthFactors {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for idx, name := range names {
+		col, err := ColumnNumberToName(idx + 8)
+		assert.NoError(t, err)
+		styleID, err := f.NewStyle(&Style{Font: &Font{Family: name}})
+		assert.NoError(t, err)
+		assert.NoError(t, f.SetCellValue("Sheet1", col+"1", name))
+		assert.NoError(t, f.SetCellValue("Sheet1", col+"2", strings.ToUpper(name)))
+		assert.NoError(t, f.SetCellStyle("Sheet1", col+"1", col+"2", styleID))
+	}
+	assert.NoError(t, f.AutoFitColWidth("Sheet1", "H:KP"))
+
+	assert.NoError(t, f.SetCellValue("Sheet1", "KQ1", strings.Repeat("s", TotalCellChars)))
+	assert.NoError(t, f.AutoFitColWidth("Sheet1", "KQ"))
+	assert.NoError(t, err)
+	width, err := f.GetColWidth("Sheet1", "KQ")
+	assert.NoError(t, err)
+	assert.Equal(t, float64(MaxColumnWidth), width)
+
+	assert.Equal(t, f.AutoFitColWidth("Sheet1", ""), newInvalidColumnNameError(""))
+	assert.Equal(t, f.AutoFitColWidth("SheetN", "A"), ErrSheetNotExist{"SheetN"})
+	_, err = f.autoFitColWidth("Sheet1", TotalRows, 1, &Font{})
+	assert.Equal(t, ErrColumnNumber, err)
+	assert.NoError(t, f.SaveAs(filepath.Join("test", "TestAutoFitColWidth.xlsx")))
+
+	f = NewFile()
+	// Test auto fit column width with unsupported charset style sheet
+	f.Styles = nil
+	f.Pkg.Store(defaultXMLPathStyles, MacintoshCyrillicCharset)
+	assert.EqualError(t, f.AutoFitColWidth("Sheet1", "A"), "XML syntax error on line 1: invalid UTF-8")
+	// Test auto fit column width with invalid cell style ID
+	f.Sheet.Store("xl/worksheets/sheet1.xml", &xlsxWorksheet{
+		SheetData: xlsxSheetData{Row: []xlsxRow{
+			{R: 1, C: []xlsxC{{R: "A1", S: 1, V: "Test"}}},
+		}},
+	})
+	_, err = f.autoFitColWidth("Sheet1", 1, 1, &Font{})
+	assert.Equal(t, err, newInvalidStyleID(1))
 }

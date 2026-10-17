@@ -6,8 +6,8 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"math"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,6 +55,7 @@ var invalidColumns = []struct {
 	{Name: "_ ", Num: -1},
 	{Name: "_1", Num: -1},
 	{Name: "1_", Num: -1},
+	{Name: "CRPXNLSKVLJFHH", Num: -1}, // Column name corresponding to math.MaxInt64+1
 }
 
 var invalidCells = []string{"", "A", "AA", " A", "A ", "1A", "A1A", "A1 ", " A1", "1A1", "a-1", "A-1"}
@@ -96,12 +97,12 @@ func TestColumnNumberToName_OK(t *testing.T) {
 func TestColumnNumberToName_Error(t *testing.T) {
 	out, err := ColumnNumberToName(-1)
 	if assert.Error(t, err) {
-		assert.Equal(t, "", out)
+		assert.Empty(t, out)
 	}
 
 	out, err = ColumnNumberToName(0)
 	if assert.Error(t, err) {
-		assert.Equal(t, "", out)
+		assert.Empty(t, out)
 	}
 
 	_, err = ColumnNumberToName(MaxColumns + 1)
@@ -218,14 +219,13 @@ func TestCoordinatesToCellName_Error(t *testing.T) {
 }
 
 func TestCoordinatesToRangeRef(t *testing.T) {
-	f := NewFile()
-	_, err := f.coordinatesToRangeRef([]int{})
+	_, err := coordinatesToRangeRef([]int{})
 	assert.EqualError(t, err, ErrCoordinates.Error())
-	_, err = f.coordinatesToRangeRef([]int{1, -1, 1, 1})
-	assert.EqualError(t, err, "invalid cell reference [1, -1]")
-	_, err = f.coordinatesToRangeRef([]int{1, 1, 1, -1})
-	assert.EqualError(t, err, "invalid cell reference [1, -1]")
-	ref, err := f.coordinatesToRangeRef([]int{1, 1, 1, 1})
+	_, err = coordinatesToRangeRef([]int{1, -1, 1, 1})
+	assert.Equal(t, newCoordinatesToCellNameError(1, -1), err)
+	_, err = coordinatesToRangeRef([]int{1, 1, 1, -1})
+	assert.Equal(t, newCoordinatesToCellNameError(1, -1), err)
+	ref, err := coordinatesToRangeRef([]int{1, 1, 1, 1})
 	assert.NoError(t, err)
 	assert.EqualValues(t, ref, "A1:A1")
 }
@@ -236,6 +236,12 @@ func TestSortCoordinates(t *testing.T) {
 
 func TestInStrSlice(t *testing.T) {
 	assert.EqualValues(t, -1, inStrSlice([]string{}, "", true))
+}
+
+func TestAttrValue(t *testing.T) {
+	assert.Empty(t, (&attrValString{}).Value())
+	assert.False(t, (&attrValBool{}).Value())
+	assert.Zero(t, (&attrValFloat{}).Value())
 }
 
 func TestBoolValMarshal(t *testing.T) {
@@ -268,6 +274,15 @@ func TestBoolValUnmarshalXML(t *testing.T) {
 	assert.EqualError(t, attr.UnmarshalXML(xml.NewDecoder(strings.NewReader("")), xml.StartElement{}), io.EOF.Error())
 }
 
+func TestExtUnmarshalXML(t *testing.T) {
+	f, extLst := NewFile(), decodeExtLst{}
+	expected := fmt.Sprintf(`<extLst><ext uri="%s" xmlns:x14="%s"/></extLst>`,
+		ExtURISlicerCachesX14, NameSpaceSpreadSheetX14.Value)
+	assert.NoError(t, f.xmlNewDecoder(strings.NewReader(expected)).Decode(&extLst))
+	assert.Len(t, extLst.Ext, 1)
+	assert.Equal(t, extLst.Ext[0].URI, ExtURISlicerCachesX14)
+}
+
 func TestBytesReplace(t *testing.T) {
 	s := []byte{0x01}
 	assert.EqualValues(t, s, bytesReplace(s, []byte{}, []byte{}, 0))
@@ -275,13 +290,19 @@ func TestBytesReplace(t *testing.T) {
 
 func TestGetRootElement(t *testing.T) {
 	assert.Len(t, getRootElement(xml.NewDecoder(strings.NewReader(""))), 0)
+	// Test get workbook root element which all workbook XML namespace has prefix
+	f := NewFile()
+	d := f.xmlNewDecoder(bytes.NewReader(fmt.Appendf(nil, `<x:workbook xmlns:r="%s" xmlns:x="%s"></x:workbook>`, SourceRelationship.Value, NameSpaceSpreadSheet.Value)))
+	assert.Len(t, getRootElement(d), 3)
 }
 
 func TestSetIgnorableNameSpace(t *testing.T) {
 	f := NewFile()
-	f.xmlAttr["xml_path"] = []xml.Attr{{}}
+	f.xmlAttr.Store("xml_path", []xml.Attr{{}})
 	f.setIgnorableNameSpace("xml_path", 0, xml.Attr{Name: xml.Name{Local: "c14"}})
-	assert.EqualValues(t, "c14", f.xmlAttr["xml_path"][0].Value)
+	attrs, ok := f.xmlAttr.Load("xml_path")
+	assert.EqualValues(t, "c14", attrs.([]xml.Attr)[0].Value)
+	assert.True(t, ok)
 }
 
 func TestStack(t *testing.T) {
@@ -334,6 +355,28 @@ func TestBstrMarshal(t *testing.T) {
 	}
 }
 
+func TestTruncateUTF16Units(t *testing.T) {
+	assertTrunc := func(s string, max int, expected string) {
+		assert.Equal(t, expected, truncateUTF16Units(s, max), "src=%q max=%d", s, max)
+		assert.LessOrEqual(t, countUTF16String(truncateUTF16Units(s, max)), max)
+	}
+	// No truncation
+	assertTrunc("ABC", 3, "ABC")
+	assertTrunc("A\U0001F600B", 4, "A\U0001F600B")
+	// Truncate cutting before BMP rune
+	assertTrunc("ABCDE", 3, "ABC")
+	// Truncate with surrogate pair boundary: keep pair intact
+	assertTrunc("A\U0001F600B", 3, "A\U0001F600") // 1 + 2 units
+	assertTrunc("A\U0001F600B", 2, "A")           // pair would overflow
+	assertTrunc("\U0001F600B", 1, "")             // first rune (2 units) exceeds limit
+	assertTrunc("\U0001F600B", 2, "\U0001F600")   // exact fit
+	assertTrunc("\U0001F600B", 3, "\U0001F600B")  // allow extra
+	// Multiple surrogate pairs
+	assertTrunc("\U0001F600\U0001F600B", 2, "\U0001F600")           // corrected expectation per logic
+	assertTrunc("\U0001F600\U0001F600B", 3, "\U0001F600")           // 2 units kept, next pair would exceed
+	assertTrunc("\U0001F600\U0001F600B", 4, "\U0001F600\U0001F600") // both pairs (4 units)
+}
+
 func TestReadBytes(t *testing.T) {
 	f := &File{tempFiles: sync.Map{}}
 	sheet := "xl/worksheets/sheet1.xml"
@@ -342,11 +385,10 @@ func TestReadBytes(t *testing.T) {
 }
 
 func TestUnzipToTemp(t *testing.T) {
-	if ver := runtime.Version(); strings.HasPrefix(ver, "go1.19") || strings.HasPrefix(ver, "go1.2") {
-		t.Skip()
-	}
-	os.Setenv("TMPDIR", "test")
-	defer os.Unsetenv("TMPDIR")
+	assert.NoError(t, os.Setenv("TMPDIR", "test"))
+	defer func() {
+		assert.NoError(t, os.Unsetenv("TMPDIR"))
+	}()
 	assert.NoError(t, os.Chmod(os.TempDir(), 0o444))
 	f := NewFile()
 	data := []byte("PK\x03\x040000000PK\x01\x0200000" +
@@ -362,7 +404,7 @@ func TestUnzipToTemp(t *testing.T) {
 		"\x00\x00\x00\x00\x0000000000\x00\x00\x00\x00000" +
 		"00000000PK\x01\x0200000000" +
 		"0000000000000000\v\x00\x00\x00" +
-		"\x00\x0000PK\x05\x06000000\x05\x000000" +
+		"\x00\x0000PK\x05\x06000000\x05\x00\xfd\x00\x00\x00" +
 		"\v\x00\x00\x00\x00\x00")
 	z, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	assert.NoError(t, err)
@@ -373,4 +415,19 @@ func TestUnzipToTemp(t *testing.T) {
 
 	_, err = f.unzipToTemp(z.File[0])
 	assert.EqualError(t, err, "EOF")
+}
+
+func TestFloat2Frac(t *testing.T) {
+	assert.Empty(t, floatToFraction(0.19, 0, 0))
+	assert.Equal(t, "1/5", floatToFraction(0.19, 1, 1))
+	assert.Equal(t, "9999/10000", strings.Trim(floatToFraction(0.9999, 10, 10), " "))
+	assert.Equal(t, "954888175898973913/351283728530932463", floatToFraction(math.E, 1, 18))
+}
+
+func TestCheckFileSize(t *testing.T) {
+	f := NewFile()
+	assert.NoError(t, f.checkFileSize(1, 1))
+	assert.EqualError(t, f.checkFileSize(UnzipSizeLimit+1, 1), newUnzipSizeLimitError(UnzipSizeLimit).Error())
+	assert.EqualError(t, f.checkFileSize(1, UnzipSizeLimit+1), newUnzipSizeLimitError(UnzipSizeLimit).Error())
+	assert.EqualError(t, f.checkFileSize(-1, 1), newUnzipSizeLimitError(UnzipSizeLimit).Error())
 }
